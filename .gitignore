@@ -1,3 +1,5 @@
 ._*
 data
 *bin
+*pt
+__pycache__/  

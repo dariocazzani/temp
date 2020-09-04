@@ -6,3 +6,5 @@ tqdm
 joblib
 numba==0.48
 librosa==0.7.2
+online_triplet_loss
+efficientnet_pytorch
