@@ -1,0 +1,8 @@
+ipython
+torch
+torchvision
+torchaudio
+tqdm
+joblib
+numba==0.48
+librosa==0.7.2
