@@ -25,6 +25,24 @@ class Normalize(nn.Module):
         return audio / (max_value + 1E-10)
 
 
+class Normalize3D(nn.Module):
+    """ Scale Spectrogram to be between 0 and 1
+    """
+    def __init__(self):
+        super(Normalize3D, self).__init__()
+
+    def forward(self, X:torch.Tensor):
+        if len(X.shape) != 3:
+            raise ValueError("Input should be 3D: [batch_size X num_features X num_steps]")
+        
+        batch_size, num_features, num_steps = X.shape
+        X = X.contiguous().view(batch_size, num_features*num_steps)
+        max_value = torch.max(torch.abs(X), dim=1)[0].detach()
+        max_value = torch.unsqueeze(max_value,1)
+        X = X / (max_value + 1E-10)
+        return X.view(batch_size, num_features, num_steps)
+
+
 class Model(nn.Module):
     """
 
@@ -38,11 +56,12 @@ class Model(nn.Module):
         preprocess_steps = list()
         preprocess_steps.append(Normalize())
         preprocess_steps.append(torchaudio.transforms.MelSpectrogram(sample_rate=self.sr, n_fft=400, win_length=400, hop_length=160, n_mels=self.n_mels))
+        preprocess_steps.append(Normalize3D())
         
         self.eval_preprocess_steps = nn.Sequential(*tuple(preprocess_steps))
 
-        preprocess_steps.append(torchaudio.transforms.FrequencyMasking(freq_mask_param=20))
-        preprocess_steps.append(torchaudio.transforms.TimeMasking(time_mask_param=25))
+        preprocess_steps.append(torchaudio.transforms.FrequencyMasking(freq_mask_param=10))
+        preprocess_steps.append(torchaudio.transforms.TimeMasking(time_mask_param=15))
 
         self.train_preprocess_steps = nn.Sequential(*tuple(preprocess_steps))
 
