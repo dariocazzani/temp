@@ -3,3 +3,5 @@ data
 *bin
 *pt
 __pycache__/  
+audio
+*zip
