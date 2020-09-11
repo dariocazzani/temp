@@ -13,6 +13,7 @@ import time
 import numpy as np
 from glob import glob
 import librosa
+from collections import defaultdict
 
 from model import Model
 from utils import chunk_data, preprocess, AverageMeter, accuracy
@@ -43,11 +44,19 @@ def main():
                                     drop_last=True,
                                     **kwargs)
 
+    test_loader = DataLoader(dataset=test_dataset,
+                                    batch_size=1,
+                                    shuffle=True,
+                                    drop_last=True,
+                                    **kwargs)
+
+    
+
     torch.manual_seed(config.get("SEED", "value"))
     model = Model(num_classes = len(labels_dict))
     device = torch.device("cuda:0")
 
-    print(f'Number of model parameters: {sum([p.data.nelement() for p in model.parameters()]):,}')
+    print(f'Number of model parameters (without the classifier layer): {sum([p.data.nelement() for name, p in model.named_parameters() if not "_fc" in name]):,}')
     print(f'Number of classes: {len(labels_dict)}')
 
     ce_criterion = nn.CrossEntropyLoss().to(device)
@@ -69,7 +78,7 @@ def main():
             train(train_loader, model, ce_criterion, optimizer, epoch, device, best_acc)
 
             # evaluate on validation set
-            val_acc = validate(model, device)
+            val_acc = validate(model, test_loader, device)
             print(f"Current validation accuracy: {val_acc:.2f}%")
 
             scheduler.step(val_acc)
@@ -120,7 +129,7 @@ def train(train_loader, model, ce_criterion, optimizer, epoch, device, best_acc)
         features, output = model(input_var, train=True)
         ce_loss = ce_criterion(output, target_var)
         triplet_loss = batch_hard_triplet_loss(target_var, features, margin=1, device=device)
-        loss = ce_loss + config.getfloat("HYPERPARAMS", "triplet_loss_alpha") * triplet_loss
+        loss = ce_loss# + config.getfloat("HYPERPARAMS", "triplet_loss_alpha") * triplet_loss
 
         # measure accuracy and record loss
         prec1 = accuracy(output.data, target, topk=(1,))[0]
@@ -149,44 +158,42 @@ def train(train_loader, model, ce_criterion, optimizer, epoch, device, best_acc)
 
             print(string)
    
-def validate(model, device) -> float:
+def validate(model, test_loader, device) -> float:
     # switch to evaluate mode
     model.eval()
-    X = list()
-    y = list()
-    print(f"Computing enrollment vectors...")
-    for en_file in tqdm(enroll_files):
-        audio, sr = librosa.load(en_file)
+    validate_dict = defaultdict(list)
+    print(f"Computing enrollment and test vectors")
+    for waveform, sample_rate, _, speaker_id, _, _ in tqdm(test_loader):
+        speaker_id = speaker_id.item()
+        audio = np.squeeze(waveform.cpu().numpy())
         chunks = chunk_data(audio, int(config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr")))
         chunks = torch.from_numpy(chunks.astype(np.float32)).to(device)
         embeddings, _ = model(chunks, train=False)
         embeddings = list(embeddings.cpu().detach().numpy())
-        X.extend(embeddings)
-        label = en_file.split("/")[-2]
-        y.extend([label]*len(embeddings))
+        validate_dict[speaker_id].append(embeddings)
 
-    print(f"Creating Nearest Neighbor classifier")
-    neigh = KNeighborsClassifier(n_neighbors=3, metric='cosine')
-    neigh.fit(X, y)
+    accuracy = 0
+    print(f"Running {config.getint("MISC", "validation_trials")} tests...")
+    for idx, _ in tqdm(numerate(range(config.getint("MISC", "validation_trials")))):
+        X = list()
+        y = list()
+        X_test = list()
+        y_test = list()
 
-    correct = 0
-    wrong = 0
-    print(f"Running validation...")
-    for t_file in tqdm(test_files):
-        audio, sr = librosa.load(t_file)
-        chunks = chunk_data(audio, int(config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr")))
-        chunks = torch.from_numpy(chunks.astype(np.float32)).to(device)
-        embeddings, _ = model(chunks, train=False)
-        embeddings = list(embeddings.cpu().detach().numpy())
-        label = t_file.split("/")[-2]
-        for embedding in embeddings:
-            out = neigh.predict(embedding[None, :])
-            if out[0] == label:
-                correct += 1
-            else:
-                wrong += 1
+        for label, embeddings in validate_dict.items():
+            enrol_x = embeddings.pop(random.randrange(len(embeddings)))
+            X.extend(enrol_x)
+            y.extend([label]*len(enrol_x))
 
-    return 100 * (correct / (correct+wrong))
+            for embs in embeddings:
+                X_test.extend(embs) 
+                y_test.extend([label]*len(embs))
+
+        neigh = KNeighborsClassifier(n_neighbors=3, metric='euclidean')
+        neigh.fit(X, y)
+
+        accuracy += neigh.score(X_test, y_test)
+    return (accuracy/config.getint("MISC", "validation_trials")) * 100
 
 if __name__ == "__main__":
     main()
