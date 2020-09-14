@@ -47,7 +47,9 @@ def preprocess(x):
     audios = list()
     labels = list()
     for waveform, sample_rate, _, speaker_id, _, _ in x:
-        start = random.randint(0, waveform.shape[1] - config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr"))
+        if waveform.shape[1] < int(config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr")):
+            continue # Skip short audio samples
+        start = random.randint(0, max(0, waveform.shape[1] - config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr")))
         audio = waveform[:, start:start + int(config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr"))]
         audios.append(torch.squeeze(audio))
         labels.append(torch.tensor(labels_dict[speaker_id]))

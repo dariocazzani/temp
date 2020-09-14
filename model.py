@@ -67,7 +67,7 @@ class Model(nn.Module):
 
         self.net = EfficientNet.from_name("efficientnet-b0", include_top=False)
         self.net._change_in_channels(in_channels=1)
-        self.fc = nn.Linear(1280, self.num_classes)
+        self.classifier = nn.Linear(1280, self.num_classes)
         self.gelu = torch.nn.GELU()
         self.emb_fc = nn.Linear(1280, config.getint("HYPERPARAMS", "embeddings_size"))
 
@@ -79,7 +79,7 @@ class Model(nn.Module):
             x = self.eval_preprocess_steps(x)
         x = x.unsqueeze(1) # Add channel dimension
         features = self.net(x).view(batch_size, -1)
-        x = self.fc(features)
+        x = self.classifier(features)
         
         features = self.gelu(features)
         features = self.emb_fc(features)

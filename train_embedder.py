@@ -8,6 +8,7 @@ from online_triplet_loss.losses import batch_hard_triplet_loss
 import random
 from tqdm import tqdm
 import joblib
+import json
 import multiprocessing as mp
 import time
 import numpy as np
@@ -26,37 +27,52 @@ labels_dict = joblib.load(config.get("PATHS", "train_labels_dict"))
 
 from sklearn.neighbors import KNeighborsClassifier
 enroll_files = glob(config.get("PATHS", "enrollpath") + "/**/*wav", recursive=True)
-test_files = glob(config.get("PATHS", "enrollpath") + "/**/*wav", recursive=True)
-
-print(f"Num test speakers: {len(set([x.split('/')[-2] for x in test_files]))}")
-
 
 def main():
-    train_dataset = torchaudio.datasets.LIBRISPEECH(config.get("PATHS", "datapath"), url="train-clean-100", download=True)
-    test_dataset = torchaudio.datasets.LIBRISPEECH(config.get("PATHS", "datapath"), url="test-clean", download=True)
+    trainsets = json.loads(config.get("DATA", "trainsets"))
+    train_datasets = [torchaudio.datasets.LIBRISPEECH(config.get("PATHS", "datapath"), url=trainset, download=True) for trainset in trainsets]
+    testsets = json.loads(config.get("DATA", "testsets"))
+    test_datasets = [torchaudio.datasets.LIBRISPEECH(config.get("PATHS", "datapath"), url=testset, download=True) for testset in testsets]
+
+    
+    # train_dataset = torchaudio.datasets.LIBRISPEECH(config.get("PATHS", "datapath"), url="train-clean-100", download=True)
+    # test_dataset = torchaudio.datasets.LIBRISPEECH(config.get("PATHS", "datapath"), url="test-clean", download=True)
 
     kwargs = {'num_workers': int(mp.cpu_count()), 'pin_memory': True} if torch.cuda.is_available() else {}
 
-    train_loader = DataLoader(dataset=train_dataset,
+    train_loaders = [DataLoader(dataset=train_dataset,
                                     batch_size=config.getint("HYPERPARAMS", "batch_size"),
                                     shuffle=True,
                                     collate_fn=lambda x: preprocess(x),
                                     drop_last=True,
-                                    **kwargs)
+                                    **kwargs) for train_dataset in train_datasets]
 
-    test_loader = DataLoader(dataset=test_dataset,
+    test_loaders = [DataLoader(dataset=test_dataset,
                                     batch_size=1,
                                     shuffle=True,
                                     drop_last=True,
-                                    **kwargs)
+                                    **kwargs) for test_dataset in test_datasets]
 
-    
+
+    # train_loader = DataLoader(dataset=train_dataset,
+    #                                 batch_size=config.getint("HYPERPARAMS", "batch_size"),
+    #                                 shuffle=True,
+    #                                 collate_fn=lambda x: preprocess(x),
+    #                                 drop_last=True,
+    #                                 **kwargs)
+
+    # test_loader = DataLoader(dataset=test_dataset,
+    #                                 batch_size=1,
+    #                                 shuffle=True,
+    #                                 drop_last=True,
+    #                                 **kwargs)
+
 
     torch.manual_seed(config.get("SEED", "value"))
     model = Model(num_classes = len(labels_dict))
     device = torch.device("cuda:0")
-
-    print(f'Number of model parameters (without the classifier layer): {sum([p.data.nelement() for name, p in model.named_parameters() if not "_fc" in name]):,}')
+    print(model)
+    print(f'Number of model parameters (without the classifier layer): {sum([p.data.nelement() for name, p in model.named_parameters() if not "classifier" in name]):,}')
     print(f'Number of classes: {len(labels_dict)}')
 
     ce_criterion = nn.CrossEntropyLoss().to(device)
@@ -75,10 +91,10 @@ def main():
         for epoch in range(start_epoch, config.getint("HYPERPARAMS", "epochs")):
             # train for one epoch
             now = time.time()
-            train(train_loader, model, ce_criterion, optimizer, epoch, device, best_acc)
+            train(train_loaders, model, ce_criterion, optimizer, epoch, device, best_acc)
 
             # evaluate on validation set
-            val_acc = validate(model, test_loader, device)
+            val_acc = validate(model, test_loaders, device)
             print(f"Current validation accuracy: {val_acc:.2f}%")
 
             scheduler.step(val_acc)
@@ -107,74 +123,83 @@ def main():
         print("Manual interrupt")
 
 
-def train(train_loader, model, ce_criterion, optimizer, epoch, device, best_acc):
+def train(train_loaders, model, ce_criterion, optimizer, epoch, device, best_acc):
     """Train for one epoch on the training set"""
     batch_time = AverageMeter()
     ce_losses = AverageMeter()
     triplet_losses = AverageMeter()
     top1 = AverageMeter()
 
-    train_batches_num = len(train_loader)
+    train_batches_num = sum([len(train_loader) for train_loader in train_loaders])
 
     # switch to train mode
     model.train()
 
     end = time.time()
-    for batch_idx, (x, target) in enumerate(train_loader):
-        x = x.to(device)
-        target = target.to(device)
-        input_var = torch.autograd.Variable(x)
-        target_var = torch.autograd.Variable(target)
+    batch_idx = 0
+    for train_loader in train_loaders:
+        for x, target in train_loader:
+            x = x.to(device)
+            target = target.to(device)
+            input_var = torch.autograd.Variable(x)
+            target_var = torch.autograd.Variable(target)
 
-        features, output = model(input_var, train=True)
-        ce_loss = ce_criterion(output, target_var)
-        triplet_loss = batch_hard_triplet_loss(target_var, features, margin=1, device=device)
-        loss = ce_loss# + config.getfloat("HYPERPARAMS", "triplet_loss_alpha") * triplet_loss
+            features, output = model(input_var, train=True)
+            ce_loss = ce_criterion(output, target_var)
+            triplet_loss = batch_hard_triplet_loss(target_var, features, margin=1, device=device)
+            loss = ce_loss# + config.getfloat("HYPERPARAMS", "triplet_loss_alpha") * triplet_loss
 
-        # measure accuracy and record loss
-        prec1 = accuracy(output.data, target, topk=(1,))[0]
-        
-        top1.update(prec1.item(), x.size(0))
-        ce_losses.update(ce_loss.data.item(), x.size(0))
-        triplet_losses.update(triplet_loss.data.item(), x.size(0))
+            # measure accuracy and record loss
+            prec1 = accuracy(output.data, target, topk=(1,))[0]
+            
+            top1.update(prec1.item(), x.size(0))
+            ce_losses.update(ce_loss.data.item(), x.size(0))
+            triplet_losses.update(triplet_loss.data.item(), x.size(0))
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
+            # compute gradient and do SGD step
+            optimizer.zero_grad()
+            loss.backward()
 
-        optimizer.step()
+            optimizer.step()
 
-        batch_time.update(time.time() - end)
-        end = time.time()
+            batch_time.update(time.time() - end)
+            end = time.time()
 
-        if batch_idx % config.getint("MISC", "log_interval") == 0:
-            string = ('Epoch: [{0}][{1}/{2}]\t'
-                      'Time {batch_time.value:.3f} ({batch_time.ave:.3f})\t'
-                      'CE Loss {ce_loss.value:.4f} ({ce_loss.ave:.4f})\t'
-                      'Triplet Loss {triplet_loss.value:.4f} ({triplet_loss.ave:.4f})\t'
-                      'Accuracy {top1.value:.2f}% ({top1.ave:.2f}%)\t'.format(
-                       epoch, batch_idx+1, train_batches_num, batch_time=batch_time,
-                       ce_loss=ce_losses, triplet_loss=triplet_losses, top1=top1))
+            if batch_idx % config.getint("MISC", "log_interval") == 0:
+                string = ('Epoch: [{0}][{1}/{2}]\t'
+                        'Time {batch_time.value:.3f} ({batch_time.ave:.3f})\t'
+                        'CE Loss {ce_loss.value:.4f} ({ce_loss.ave:.4f})\t'
+                        'Triplet Loss {triplet_loss.value:.4f} ({triplet_loss.ave:.4f})\t'
+                        'Accuracy {top1.value:.2f}% ({top1.ave:.2f}%)\t'.format(
+                        epoch, batch_idx+1, train_batches_num, batch_time=batch_time,
+                        ce_loss=ce_losses, triplet_loss=triplet_losses, top1=top1))
+                print(string)
 
-            print(string)
-   
-def validate(model, test_loader, device) -> float:
+            batch_idx += 1
+
+
+def validate(model, test_loaders, device) -> float:
     # switch to evaluate mode
     model.eval()
     validate_dict = defaultdict(list)
+    val_batches_num = sum([len(test_loader) for test_loader in test_loaders])
     print(f"Computing enrollment and test vectors")
-    for waveform, sample_rate, _, speaker_id, _, _ in tqdm(test_loader):
-        speaker_id = speaker_id.item()
-        audio = np.squeeze(waveform.cpu().numpy())
-        chunks = chunk_data(audio, int(config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr")))
-        chunks = torch.from_numpy(chunks.astype(np.float32)).to(device)
-        embeddings, _ = model(chunks, train=False)
-        embeddings = list(embeddings.cpu().detach().numpy())
-        validate_dict[speaker_id].append(embeddings)
+    pbar = tqdm(total=val_batches_num)
+    for test_loader in test_loaders:
+        for waveform, sample_rate, _, speaker_id, _, _ in test_loader:
+            speaker_id = speaker_id.item()
+            audio = np.squeeze(waveform.cpu().numpy())
+            chunks = chunk_data(audio, int(config.getfloat("AUDIO", "length") * config.getint("AUDIO", "sr")))
+            chunks = torch.from_numpy(chunks.astype(np.float32)).to(device)
+            embeddings, _ = model(chunks, train=False)
+            embeddings = list(embeddings.cpu().detach().numpy())
+            validate_dict[speaker_id].append(embeddings)
+            pbar.update(1)
 
     accuracy = 0
-    print(f"Running {config.getint("MISC", "validation_trials")} tests...")
-    for idx, _ in tqdm(numerate(range(config.getint("MISC", "validation_trials")))):
+    print(f"Number of test speakers: {len(validate_dict)}")
+    print(f"Running {config.getint('MISC', 'validation_trials')} tests...")
+    for idx, _ in tqdm(enumerate(range(config.getint("MISC", "validation_trials")))):
         X = list()
         y = list()
         X_test = list()
